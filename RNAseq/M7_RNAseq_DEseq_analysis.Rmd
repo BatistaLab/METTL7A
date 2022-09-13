@@ -1,0 +1,331 @@
+---
+title: "CMF DEseq2 Analysis for METTL7 RNA-seq data"
+output: html_notebook
+author: 'Christina Fitzsimmons'
+date: 'Last updated 2022-05-04'
+---
+# Introduction
+Goal of this library is to perform differential expression analysis of the RNAseq data using the DESeq2 library. This notebook describes a repeat analysis of the METTL7 MCF7 and Hut78 RNA-seq libraries with less strict cutoff parameters
+```{r, Load Libraries}
+library(DESeq2)
+library(biomaRt)
+library(tidyverse)
+library(ComplexHeatmap)
+library(circlize)
+library("RColorBrewer")
+library("gplots")
+library(ggrepel)
+library(ggpubr)
+library(gprofiler2)
+library(ggExtra)
+```
+# 1. Analysis of MCF7 data
+This section of the notebook performs differential expression analysis on the count data from the MCF7 cells. Here, we look at naive /  (responsive to drug) and resistant populations. 
+## 1.1 Import MCF7 count data
+```{r}
+# DESeq2 analysis from HTseq tables
+setwd("/Users/fitzsimmonscm/Documents/Projects_and_Data/Batista_Lab/METTL7A/RNAseq/")
+
+# M300 is MCF-7 resistant + ABCB1 inhibitor, C is MCF-7 control
+# load files
+directory <- "~/RNAseq/RAW/MCF7_counts/"
+sampleFiles <- list.files(path = "~/RAW/MCF7_counts/", 
+                          pattern="*.count")  
+
+sampleFiles # this checks the order of the files
+                                       # this checks the order of the files
+status <- factor(c(rep("MCF7_Control",3), 
+                   rep("MCF7_M300",3)))
+sampleTable <- data.frame(sampleName = sampleFiles, fileName = sampleFiles, status=status)
+head(sampleTable)
+sampleTable
+des <- formula(~status)
+
+ddsHTSeq <- DESeqDataSetFromHTSeqCount(sampleTable = sampleTable, directory = directory, design= des)
+```
+## 1.2 Filtering the data
+```{r}
+
+#Filter data to keep only genes where row sums are greater than or equal to 10. 
+nrow(ddsHTSeq)
+keep <- rowSums(counts(ddsHTSeq)) >= 10
+dds <- ddsHTSeq[keep,]
+
+# write out the count data after filtering, but before analysis
+counts_MCF7 <- (counts(dds, normalize=FALSE))
+write.csv (as.data.frame(counts_MCF7), file="2022.03_M7project_RNAseq_MCF7_counts.csv")
+
+nrow(dds)
+head(dds)
+
+```
+## 1.3 Differential Expression Analysis
+Comparing MCF7 resistant cells to MCF7 parent (naive) cells
+```{r}
+
+# Differential expression analysis
+dds <- DESeq(dds) #creates the analysis
+
+# Create a dataframe of the results, comparing the resistant cells over the control cells
+res = results(dds, contrast=c("status","MCF7_M300","MCF7_Control"))
+summary(res)
+df1 <- as.data.frame(res)
+
+# Annotate ENSG IDs with with gProfiler
+df2 <- df1 %>%
+  rownames_to_column('ENSG') %>%
+  separate(col = ENSG, into = c("ENSG_ID", NA), sep = "[.]")
+
+# Get the names from the gProfiler query
+names <- gconvert(df2$ENSG_ID, organism = "hsapiens", target = "HGNC", filter_na = F) %>%
+  dplyr::select(input, name) %>%
+  dplyr::rename(ENSG_ID = input, gene_name = name) # change input to ENSG_ID
+
+# Join names dataframe to resOrdered df by the common column of ENSG_ID
+MCF7_names <- inner_join(names, df2, by = "ENSG_ID")
+
+
+# filter the data for upregulated and downregulated genes
+MCF7_up <- MCF7_names %>%
+  dplyr::filter(log2FoldChange >= 1.0 & padj < 0.05)
+write.csv(MCF7_up, file = "M7project_MCF7DpVp300_over_MCF7control_enriched.csv", row.names = FALSE)
+
+MCF7_down <- MCF7_names %>%
+  dplyr::filter(log2FoldChange <= -1.0 & padj < 0.05)
+write.csv(MCF7_down, file = "M7project_MCF7DpVp300_over_MCF7control_depleted.csv", row.names = FALSE)
+
+# export MCF7 dataframe
+write.csv(MCF7_names, file = "M7project_MCF7DpVp300_over_MCF7control_diffex.csv", row.names = FALSE)
+
+
+```
+## 1.4 Plotting the MCF7 volcano plot
+Here we'll going to plot the MCF7 volcano plot. I will label genes of interest (METTL7A and ABCB1 (PGP)). I'll also manually correct the values where we are dividing by zero (see comment below)
+```{r}
+# 7. Generate select plots of the data
+gene_list <- c("METTL7A", "PGP")
+
+# a = log10(2.225074e-308)
+# some changes are so significant that we are essentially dividing by zero. Here I correct that to the smallest number R can display
+# smallest floating point number in R is 2.225074e-308. 
+# Mike Love (DEseq2 author) seems to think this method is fine. 
+
+MCF7_names <- MCF7_names %>%
+  mutate(padj = ifelse(padj == 0, 2.225074e-308, padj)) %>%
+  mutate("logDESeqP" = -1*log10(padj)) %>%
+  mutate(plotname = as.character(gene_name)) %>%
+  mutate(plotname = ifelse(plotname %in% gene_list, plotname, "")) %>%
+  dplyr::arrange(plotname)
+
+
+# volcano plot visualization within Rstudio
+volcano1 <- ggplot(MCF7_names, aes(x = log2FoldChange, y = logDESeqP, label = plotname)) +
+  geom_point(color = ifelse(MCF7_names$plotname == "", "black", "red")) + # scatter point with select genes colored 
+  geom_text_repel(box.padding = 0.5, # label genes of interest, ensure labels don't overlap 
+                  max.overlaps = Inf, 
+                  segment.color = "red",
+                  size = 3,
+                  color = "red") +
+  theme_bw() +
+  ylim(0,325)+ # adjust according to data
+  xlim(-10,10)+ # adjust according to data
+  geom_vline(xintercept = -1, linetype="dashed") + geom_vline(xintercept = 1, linetype = "dashed") + # add vertical lines indicating significace
+  geom_hline(yintercept = 1.30, linetype = "dashed") + # add horizontal line for padj
+  labs(title = "Differential Gene Expression in MCF7 cells",
+       x = "Log2FoldChange (MCF7 DpVp 300/MCF7 Control)", y = "-Log10(padj)") 
+volcano1
+
+# write out the MCF7 volcano plot
+pdf("2022.05.04_METTL7_volcano_MCFDpVp300_over_MCF7parent_less_strict_filter.pdf", 
+    useDingbats=FALSE,
+    width=5, height=4)
+volcano1
+dev.off()
+```
+# 2. Analysis of Hut78 data
+## 2.1 Import of Data
+
+```{r}
+# DESeq2 analysis from HTseq tables
+setwd("/Users/fitzsimmonscm/Documents/Projects_and_Data/Batista_Lab/METTL7A/RNAseq/")
+
+# Hut78_c = control, untreated cells; 
+# Hut78_Dp = cells treated with only romidepsin; 
+# Hut78_DpVp50 = cells treated with romidepsin + PgP inhibitor
+
+# load files
+directory2 <- "~RNAseq/RAW/Hut78_counts/"
+sampleFiles2 <- list.files(path = "~RAW/Hut78_counts/", 
+                          pattern="*.count")  
+
+sampleFiles2 # this checks the order of the files
+                                       # this checks the order of the files
+status2 <- factor(c(rep("Hut78_Control",3), 
+                   rep("Hut78_Dp",3),
+                   rep("Hut78_DpVp50", 3)))
+sampleTable2 <- data.frame(sampleName = sampleFiles2, fileName = sampleFiles2, status=status2)
+head(sampleTable2)
+sampleTable2
+des <- formula(~status)
+
+ddsHTSeq2 <- DESeqDataSetFromHTSeqCount(sampleTable = sampleTable2, directory = directory2, design= des)
+```
+## 2.2 Filter and create DDS analysis
+```{r}
+
+raw_counts <- (counts(ddsHTSeq2))
+
+nrow(ddsHTSeq2)
+keep2 <- rowSums(counts(ddsHTSeq2)) >= 10
+dds2 <- ddsHTSeq2[keep2,]
+
+# write out the count data after filtering, but before analysis
+counts_Hut78 <- (counts(dds2, normalize=FALSE))
+write.csv (as.data.frame(counts_Hut78), file="M7project_RNAseq_Hut78_counts.csv")
+
+nrow(dds2)
+head(dds2)
+
+# Differential expression analysis
+dds2 <- DESeq(dds2) #creates the analysis
+```
+## 2.3 Analysis and gene annotation
+```{r}
+# Create the results dataframe
+res_hut = results(dds2, contrast=c("status","Hut78_DpVp50","Hut78_Control"))
+summary(res_hut)
+df22 <- as.data.frame(res_hut)
+
+# Annotate with gProfiler
+df_annot <- df22 %>%
+  rownames_to_column('ENSG') %>%
+  separate(col = ENSG, into = c("ENSG_ID", NA), sep = "[.]")
+
+# Get the names from the gProfiler query
+names_hut <- gconvert(df_annot$ENSG_ID, organism = "hsapiens", target = "HGNC", filter_na = F) %>%
+  dplyr::select(input, name) %>%
+  dplyr::rename(ENSG_ID = input, gene_name = name) # change input to ENSG_ID
+
+# Join names dataframe to resOrdered df by the common column of ENSG_ID
+Hut78_names <- full_join(names_hut, df_annot, by = "ENSG_ID")
+
+# export Hut78 dataframe
+write.csv(Hut78_names, file = "M7project_Hut78DpVp50_over_Hut78control_diffex.csv", row.names = FALSE)
+
+# filter the upregulated and downregulated genes
+Hut78_up <- Hut78_names %>%
+  dplyr::filter(log2FoldChange >= 1.0 & padj < 0.05)
+#write.csv(Hut78_up, file = "M7project_Hut78DpVp50_over_Hutcontrol_enriched.csv", row.names = FALSE)
+
+Hut78_down <- Hut78_names %>%
+  dplyr::filter(log2FoldChange <= -1.0 & padj < 0.05)
+#write.csv(Hut78_down, file = "M7project_Hut78DpVp50_over_Hutcontrol_depleted.csv", row.names = FALSE)
+
+```
+## 2.4 Plotting the Hut78 volcano
+```{r}
+Hut78_names <- Hut78_names %>%
+  mutate(padj = ifelse(padj == 0, 2.225074e-308, padj)) %>% # same as above, fixing Inf values for plotting
+  mutate("logDESeqP" = -1*log10(padj)) %>%
+  mutate(plotname = as.character(gene_name)) %>%
+  mutate(plotname = ifelse(plotname %in% gene_list, plotname, "")) %>%
+  dplyr::arrange(plotname)
+
+
+# Hut78 volcano plot
+volcano2 <- ggplot(Hut78_names, aes(x = log2FoldChange, y = logDESeqP, label = plotname)) +
+  geom_point(color = ifelse(Hut78_names$plotname == "", "black", "red")) +
+    geom_text_repel(box.padding = 0.5, 
+                  max.overlaps = Inf, 
+                  segment.color = "red",
+                  size = 3,
+                  color = "red") +
+  theme_bw() +
+  ylim(0,325)+
+  xlim(-10,10)+
+  geom_vline(xintercept = -1, linetype="dashed") + geom_vline(xintercept = 1, linetype = "dashed") +
+  geom_hline(yintercept = 1.30, linetype = "dashed") +
+  labs(title = "Differential Gene Expression in Hut78 cells",
+       x = "Log2FoldChange (Hut78 DpVp 50/Hut78 Control)", y = "-Log10(padj)") 
+volcano2
+
+pdf("METTL7_volcano_Hut78DpVp50_over_Hut78parent.pdf", 
+    useDingbats=FALSE,
+    width=5, height=4)
+volcano2
+dev.off()
+```
+# 3. MCF7 and Hut78 intersection scatter plot
+Here, we perform an intersection of the two data sets, and compare the results by scatter plot and marginal histogram
+
+## 3.1 MCF7 and Hut78 regular scatter plot
+```{r}
+MCF7_slim <- MCF7_names %>%
+  dplyr::select(ENSG_ID, gene_name, log2FoldChange, padj) %>%
+  dplyr::rename(MCF7_l2fc = log2FoldChange, MCF7_padj = padj)
+
+Hut_slim <-  Hut78_names %>%
+  dplyr::select(ENSG_ID, gene_name, log2FoldChange, padj) %>%
+  dplyr::rename(Hut78_l2fc = log2FoldChange, Hut78_padj = padj)  
+
+combo <- inner_join(MCF7_slim, Hut_slim, by = c("ENSG_ID", "gene_name"))
+
+#which genes are up-regulated in both cell types? These are of high interest.
+uplist <- dplyr::filter(combo, Hut78_l2fc >= 5.0 & MCF7_l2fc >= 5.0)
+
+# plot the MCF7 vs Hut78  scatter plot
+plot3 <- ggplot(combo, aes(x = MCF7_l2fc, y=Hut78_l2fc, label=gene_name)) +
+  geom_bin2d(bins = 150) +
+  scale_fill_continuous(type = "viridis") +
+  theme_bw() +
+  ylim(-10,10)+
+  xlim(-10,10)+
+  geom_vline(xintercept = 5, linetype="dashed") + 
+  geom_hline(yintercept = 5, linetype = "dashed") 
+plot3
+
+# write out a pdf of the plot
+pdf("METTL7_scatterplot_MCF7_l2fc_vs_Hut78.pdf", 
+    useDingbats=FALSE,
+    width=5, height=4)
+plot3
+dev.off()
+
+```
+## 3.2 marginal histogram plot
+Using the same data as above, I generate a scatter plot with marginal histogram or marginal density. 
+```{r}
+plot4 <- ggplot(combo, aes(x = MCF7_l2fc, y=Hut78_l2fc, label=gene_name)) +
+  geom_point(size = 0.4) +
+  theme_bw() +
+  ylim(-10,10)+
+  xlim(-10,10)+
+  geom_vline(xintercept = 5, linetype="dashed") + 
+  geom_hline(yintercept = 5, linetype = "dashed")
+plot4
+
+p5 <- ggExtra::ggMarginal(plot4, type ="density", xparams = list(fill = c("#66C2A5")), yparams = list(fill=c("#FC8D62")), binwidth = 0.25)
+p5
+
+# write out the marginal density plot
+pdf("METTL7_marginal_density_MCF7_l2fc_vs_Hut78_l2fc.pdf", 
+   useDingbats=FALSE,
+    width=5, height=4)
+p5
+dev.off()
+
+# A different version of the marginal density plot 
+# will let group decide which they prefer
+p6 <- ggExtra::ggMarginal(plot4, binwidth = 0.2, type ="histogram", xparams = list(fill = c("#66C2A5")), yparams = list(fill=c("#FC8D62")))
+p6
+
+# write out the marginal histogram plot
+pdf("2022.05.11_METTL7_marginal_histogram_MCF7_l2fc_vs_Hut78_l2fc.pdf", 
+  useDingbats=FALSE,
+    width=5, height=4)
+p6
+dev.off()
+
+brewer.pal(n=5,"Set2")
+
+```

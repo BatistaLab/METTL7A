@@ -1,0 +1,161 @@
+---
+title: "GO-term analysis and plotting for METTL7A"
+output: html_notebook
+author: 'Christina Fitzsimmons'
+date: 'Last updated 2022-05-08'
+---
+
+# Introduction
+Goal of this library is to plot the GO-terms from Metascape and reviGO collapse
+```{r, Load Libraries}
+library(tidyverse)
+library("RColorBrewer")
+library(ggrepel)
+library(ggpubr)
+library(gprofiler2)
+
+theme_set(theme_bw())
+
+```
+# Import GO-term data from METASCAPE
+Genes with l2fc 1 and padj < 0.05 from MCF7 and Hut78 RNA-seq data sets were analyzed with [Metascape](https://metascape.org/gp/index.html#/main/step1) and the resulting lists were imported here. 
+```{r}
+
+#Import and filter GO-term data
+Hut78_down <- read.csv(file = "./2022.05/2022.05_Metascape_Results/2022.05_l2fc1_padj05_Hut78_downregulated/Enrichment_GO/_FINAL_GO.csv", 
+                       header = TRUE)
+
+Hut78_up <- read.csv(file = "./2022.05/2022.05_Metascape_Results/2022.05_l2fc1_padj05_Hut78_upregulated/Enrichment_GO/_FINAL_GO.csv",
+                     header = TRUE)
+
+MCF7_down <- read.csv(file = "./2022.05/2022.05_Metascape_Results/2022.05_l2fc1_padj05_MCF7_downregulated/Enrichment_GO/_FINAL_GO.csv",
+                      header = TRUE)
+
+MCF7_up <- read.csv(file= "./2022.05/2022.05_Metascape_Results/2022.05_l2fc1_padj05_MCF7_upregulated/Enrichment_GO/_FINAL_GO.csv",
+                   header = TRUE)
+                    
+```
+The data was filtered for only GO:BiologicalPathway terms and written to a csv file for analysis in [ReviGO](http://revigo.irb.hr/) Revigo will collapse lists of GO-terms by removing redundant ones. 
+```{r}
+
+# Filter for GO-biological process
+Hut78_down_BP <- Hut78_down %>%
+  dplyr::filter(Category == 'GO Biological Processes')
+write.csv(Hut78_down_BP, file = "./2022.05/2022.05_Metascape_Results/reviGO_input/Hut78_down_GOBP.csv")
+
+Hut78_up_BP <- Hut78_up %>%
+  dplyr::filter(Category == 'GO Biological Processes')
+write.csv(Hut78_up_BP, file = "./2022.05/2022.05_Metascape_Results/reviGO_input/Hut78_up_GOBP.csv")
+
+MCF7_down_BP <- MCF7_down %>%
+  dplyr::filter(Category == 'GO Biological Processes')
+write.csv(MCF7_down_BP, file = "./2022.05/2022.05_Metascape_Results/reviGO_input/MCF7_down_GOBP.csv")
+
+MCF7_up_BP <- MCF7_up %>%
+  dplyr::filter(Category == 'GO Biological Processes')
+write.csv(MCF7_up_BP, file = "./2022.05/2022.05_Metascape_Results/reviGO_input/MCF7_up_GOBP.csv")
+
+```
+# plots of reviGO collapsed data
+Revigo collapsed data (collapsed at "small" (0.5) level) were imported to R for plotting. 
+```{r}
+Hut78_down_revigo <- read_tsv("./2022.05/2022.05_Metascape_Results/reviGO_output/2022.05_revigo_filter05_Hut78_down.tsv")
+
+Hut78_up_revigo <- read_tsv("./2022.05/2022.05_Metascape_Results/reviGO_output/2022.05_revigo_filter05_Hut78_up.tsv")
+
+MCF7_down_revigo <- read_tsv("./2022.05/2022.05_Metascape_Results/reviGO_output/2022.05_revigo_filter05_MCF7_down.tsv")
+
+MCF7_up_revigo <- read_tsv("./2022.05/2022.05_Metascape_Results/reviGO_output/2022.05_revigo_filter05_MCF7_up.tsv")
+```
+
+# Revigo collapsed GO-term plots
+Hut78 and MCF7
+```{r, Hut78 filtering}
+
+# getting things in order
+# https://wilkelab.org/SDS375/slides/getting-things-in-order.html#43
+
+Hut78_down_10 <- Hut78_down_revigo %>%
+  dplyr::filter(Eliminated == FALSE) %>%
+  dplyr::arrange(Value) %>% 
+  dplyr::slice(1:10) %>% # select the first 10 GO-terms
+  dplyr::mutate("log10P" = -1* Value) %>%
+  dplyr::mutate(direction = 'downregulated') %>%
+  dplyr::mutate(TermID = factor(TermID, TermID)) # This ranks the GO-terms in my order, rather than alphabetically. 
+
+Hut78_up_10 <- Hut78_up_revigo %>%
+  dplyr::filter(Eliminated == FALSE) %>%
+  dplyr::arrange(Value) %>% 
+  dplyr::slice(1:10) %>% # select the first 10 GO-terms
+  dplyr::mutate("log10P" = -1* Value) %>%
+  dplyr::mutate(direction = 'upregulated') %>%
+  dplyr::mutate(TermID = factor(TermID, TermID)) # This ranks the GO-terms in my order, rather than alphabetically. 
+
+Hut78_combined <- bind_rows(Hut78_down_10, Hut78_up_10) %>%
+  dplyr::mutate(id = row_number())
+
+```
+```{r, MCF7 filtering}
+
+MCF7_down_10 <- MCF7_down_revigo %>%
+  dplyr::filter(Eliminated == FALSE) %>%
+  dplyr::arrange(Value) %>% 
+  dplyr::slice(1:10) %>% # select the first 10 GO-terms
+  dplyr::mutate("log10P" = -1* Value) %>%
+  dplyr::mutate(direction = 'downregulated') %>%
+  dplyr::mutate(TermID = factor(TermID, TermID)) # This ranks the GO-terms in my order, rather than alphabetically. 
+
+MCF7_up_10 <- MCF7_up_revigo %>%
+  dplyr::filter(Eliminated == FALSE) %>%
+  dplyr::arrange(Value) %>% 
+  dplyr::slice(1:10) %>% # select the first 10 GO-terms
+  dplyr::mutate("log10P" = -1* Value) %>%
+  dplyr::mutate(direction = 'upregulated') %>%
+  dplyr::mutate(TermID = factor(TermID, TermID)) # This ranks the GO-terms in my order, rather than alphabetically. 
+
+MCF7_combined <- bind_rows(MCF7_down_10, MCF7_up_10) 
+```
+
+# barplots
+```{r}
+Hut78_all_plot <- ggplot(Hut78_combined , aes(x = log10P, y =TermID, fill = direction)) +
+  geom_col(show.legend = FALSE) +
+  facet_grid(direction ~ ., scales = "free") +
+  geom_text(aes(label=Name), 
+            hjust = 0, x=0, size = 3) +
+  labs(title = "Hut78 GO Biological Process",
+       subtitle = "reviGO collapse 0.5",
+       x = "-Log10P", y = "") +
+    scale_y_discrete(limits = rev)
+Hut78_all_plot
+
+
+MCF7_all_plot <- ggplot(MCF7_combined , aes(x = log10P, y = TermID, fill = direction)) +
+  geom_col(show.legend = FALSE) +
+  facet_grid(direction ~ ., scales = "free") +
+  geom_text(aes(label=Name), 
+            hjust = 0, x=0, size = 3) +
+  labs(title = "MCF7 GO Biological Process",
+       subtitle = "reviGO collapse 0.5",
+       x = "-Log10P", y = "") +
+  scale_y_discrete(limits = rev)
+MCF7_all_plot
+```
+# Exporting bar plots
+The resulting plots were exported to pdf format for compilation in illustrator
+```{r}
+# Exporting the figures
+pdf("2022.05.07_Hut78_l2fc1_padj05_revigo07_barplot.pdf", 
+   useDingbats=FALSE,
+   width=5, height=4)
+Hut78_all_plot
+dev.off()
+
+pdf("2022.05.07_MCF7_l2fc1_padj05_revigo07_barplot.pdf", 
+   useDingbats=FALSE,
+   width=5, height=4)
+MCF7_all_plot
+dev.off()
+```
+
+
