@@ -1,0 +1,45 @@
+---
+title: "Pileup_Graph_Generic"
+output: html_notebook
+---
+Set working directory and resolve imports
+```{r}
+setwd("") #set working directory to folder containing manually collated pileups
+library(ggplot2)
+library(dplyr)
+```
+Import File & Transform Data
+```{r}
+pileup_data <- read.table(file = "mut_collated.csv",sep = ",",header = TRUE)
+pileup_data_subset1 <- pileup_data[pileup_data$POS >= ,] #set positions to graph here
+pileup_data_subset_mut <- pileup_data_subset1[pileup_data_subset1$POS <= ,] #set positions to graph here
+pileup_data_subset_mut$POS_CAT <- as.character(pileup_data_subset_mut$POS)
+pileup_data_subset_mut$condition <- "mutant"
+write.csv(pileup_data_subset_mut, file = "mt_subset.csv")
+```
+
+```{r}
+pileup_data1 <- read.table(file = "wt_collated.csv",sep = ",",header = TRUE)
+pileup_data_subset_a <- pileup_data1[pileup_data1$POS >= ,] #set positions to graph here
+pileup_data_subset_wt <- pileup_data_subset_a[pileup_data_subset_a$POS <= ,] #set positions to graph here
+pileup_data_subset_wt$POS_CAT <- as.character(pileup_data_subset_wt$POS)
+pileup_data_subset_wt$condition <- "wildtype"
+write.csv(pileup_data_subset_wt, file = "wt_subset.csv")
+```
+```{r}
+alldata <- bind_rows(pileup_data_subset_mut,pileup_data_subset_wt)
+```
+Create Graphs
+```{r}
+alldata_plot <- ggplot() +
+  geom_boxplot(data=alldata, aes(x=POS_CAT,y=FREQ2,fill=condition), width=.75) + 
+  geom_point(data=alldata,aes(x=POS_CAT,y=FREQ2,fill=condition),position=position_dodge2(.75)) +
+  ggtitle("") +
+  xlab("Position") +
+  ylab("Misincorporation Frequency") +
+  ylim(0,1) +
+  theme_classic()
+alldata_plot
+ggsave(".pdf",dpi=800)
+```
+
