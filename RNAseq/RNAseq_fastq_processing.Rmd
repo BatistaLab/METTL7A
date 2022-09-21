@@ -1,0 +1,109 @@
+---
+title: "Analysis of METTL7 RNAseq data" 
+output: html_notebook
+author: 'Christina Fitzsimmons'
+---
+
+# Introduction
+The purpose of this notebook is to process and count fastq files for downstream differential gene expression analysis. We have 2 cell types: MCF7 and Hut78. The MCF7 are further broken down into parent [MCF7] and drug resistant (MCF7 DpVp300). The Hut78 cells are in 3 types: parent [Hut78 or parent], cells treated with both romidepsin and verapamil [Hut78 DpVp50], and those with just Dp [Hut78 Dpp 75].
+
+Representative examples for each are shown. 
+
+# 1. Trim adaptors
+Removing illumina adaptors using cutadapt on the biowulf cluster
+```{bash}
+#! /bin/bash
+set -e
+
+#sbatch --cpus-per-task=4 --mem=30G trim.7.sh --partition=ccr
+
+r1=/~/rawdata/M300-3_S31_R1_001.fastq.gz
+r2=~/rawdata/M300-3_S31_R2_001.fastq.gz
+
+module load cutadapt/2.3 || exit 1
+cutadapt --nextseq-trim=20 --trim-n -m 20 \
+--cores=$SLURM_CPUS_PER_TASK \
+-b AGATCGGAAGAGCACACGTCTGAACTCCAGTCA -b AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT \
+-B AGATCGGAAGAGCACACGTCTGAACTCCAGTCA -B AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT \
+-o M300-3_S31_R1_001.trimm.fastq -p M300-3_S31_R2_001.trimm.fastq \
+$r1 $r2
+
+```
+# 2. Map to Genome
+Mapped against hg38 using STAR as an aligner. 
+```{bash}
+#! /bin/bash
+# readFilesIn paired end syntax = path to read1.fastq /space/ path to read2.fastq
+# sbatch --cpus-per-task=12 --mem=35g --gres=lscratch:20
+set -o pipefail
+set -e
+
+function fail {
+    echo "$@" >&2
+    exit 1
+}
+
+module load samtools/1.9         || fail "could not load samtools module"
+module load STAR/2.7.0f          || fail "could not load STAR module"
+cd /data/BatistaLab_NGS/M7                         || fail "no such directory"
+mkdir -p M300_3
+GENOME=/fdb/STAR_indices/2.7.0f/GENCODE/Gencode_human/release_27/genes-150
+STAR \
+    --runThreadN $SLURM_CPUS_PER_TASK \
+    --genomeDir $GENOME \
+    --sjdbOverhang 150 \
+    --readFilesIn M300-3_S31_R1_001.trimm.fastq M300-3_S31_R2_001.trimm.fastq \
+    --outSAMtype BAM Unsorted \
+    --outTmpDir=/lscratch/$SLURM_JOB_ID/STARtmp \
+    --outReadsUnmapped Fastx \
+    --outFileNamePrefix M300_3/M300-3 \
+    –-outFilterType BySJout \
+    --outFilterMultimapNmax 10 \
+    --outFilterMismatchNmax 999 \
+    --outFilterMismatchNoverLmax 0.04 \
+    --alignIntronMin 20 \
+    --alignIntronMax 1000000 \
+    --alignMatesGapMax 1000000 \
+    --alignSJoverhangMin 8 \
+    --alignSJDBoverhangMin 1 \
+    --sjdbScore 1 \
+    --outFilterMatchNminOverLread 0.66 \
+    --quantMode TranscriptomeSAM \
+    --peOverlapNbasesMin 10 \
+    --alignEndsProtrude 10 ConcordantPair
+
+```
+# 3. Remove Duplicates
+```{bash}
+#! /bin/bash
+
+set -e
+module load picard
+java -Xmx4g -XX:ParallelGCThreads=5 -jar $PICARDJARPATH/picard.jar MarkDuplicates \
+    I=/~/MCF7/$FILE.mapped.sorted.out.bam \
+    O=~/$FILE.remove_dup.bam \
+    ASSUME_SORTED=true \
+    METRICS_FILE=$FILE.mapped.metric.csv \
+    MAX_FILE_HANDLES_FOR_READ_ENDS_MAP=1000 \
+    VALIDATION_STRINGENCY=LENIENT \
+    REMOVE_DUPLICATES=TRUE 
+```
+# 4. Count
+Count in stranded mode using `htseq-count` and standard out 
+```{bash}
+#! /bin/bash
+set -e
+
+module load htseq
+htseq-count -m intersection-nonempty -s reverse -f bam -r pos -t exon -i gene_id
+
+/$FILE.remove_dup.bam /data/BatistaLab_NGS/annotations/v35/gencode.v35.annotation.gtf > $FILE.count
+
+# FLAGS
+# -m = mode (options = union / intersection-strict / intersection-nonempty)
+# -s = strand-specific (options = yes / no / reverse)
+# -r = how data are sorted (position / name)
+# -f = format of data (BAM / SAM)
+# -t = feature type (3rd column of GFF file; e.g. exons)
+# -i = GFF attribute to use as feature ID (default = gene_id)
+```
