@@ -1,0 +1,871 @@
+---
+title: "METTL7 Notebook"
+---
+
+# Load libraries
+
+```{r}
+setwd("/Volumes/My Passport for Mac/LCB_BACKUPS_JULY2022/Batista Lab")
+library(ggplot2)
+library(grid)
+library(gridExtra)
+library(ggrepel)
+
+
+```
+
+# Run PEPATAC
+
+```{bash}
+module load bedtools bowtie preseq samblaster samtools fastqc R
+export METTL7A_PEPATAC="/data/METTL7_project/ATACseq/pepatac/"
+export REFGENIE="/data/guibletwm/pepatac/pepatac_tutorial/refgenie_config.yaml"
+export DIVCFG="/data/METTL7_project/ATACseq/pepatac/compute_config.yaml"
+export PATH="$PATH:/data/METTL7_project/ATACseq/pepatac/tools/pepatac/tools/"
+export PATH="$PATH:/data/METTL7_project/ATACseq/pepatac/tools/UCSC_tools/"
+export PROCESSED="/data/METTL7_project/ATACseq/pepatac/processed/"
+export CODEBASE="/data/METTL7_project/ATACseq/pepatac/tools/"
+
+looper run METTL7A.yaml
+looper runp METTL7A.yaml
+```
+
+# Peak enrichement/depletion with DeSeq2
+
+File from PEPATAC: PEPATAC_METTL7A_hg38_peaks_coverage.tsv
+
+```{r}
+#PEPATAC_DeSeq2.r
+# Do not run as chunk but copy paste on local machine.
+# Comment in and out for MCF7 or Hut78
+
+library(dplyr)
+
+args = commandArgs(trailingOnly=TRUE)
+ctrl_sample <- args[1]
+test_sample <- args[2]
+
+# READ DATA INTO MATRIX
+rawdata <- read.table("../processed/summary/PEPATAC_METTL7A_hg38_peaks_coverage.tsv", header=T, row.names=1)
+
+data <- cbind(rawdata[,4], rawdata[,9], rawdata[,5], rawdata[,10]) # MCF7
+#data <- cbind(rawdata[,1], rawdata[,6], rawdata[,2], rawdata[,7], rawdata[,3], rawdata[,8]) # Hut78
+
+row.names(data) <- row.names(rawdata)
+data <- data[rowSums(data[])>0,]
+countdata <- as.matrix(data)
+
+# MAKE MATRIX A DESEQ2 OBJECT
+library(DESeq2)
+
+condition <- c('MCF7_parent', 'MCF7_parent', 'MCF7_DpVp', 'MCF7_DpVp') # MCF7
+#condition <- c('Hut78_parent', 'Hut78_parent', 'Hut78_DpVp50', 'Hut78_DpVp50', 'Hut78_Dpp75', 'Hut78_Dpp75') # Hut78
+
+coldata <- data.frame(row.names=colnames(countdata), condition)
+print(coldata)
+dds <- DESeqDataSetFromMatrix(countData=countdata, colData=coldata, design=~condition)
+print(summary(dds))
+dds
+
+#filter the dataset - remove all zeros, influences padj
+nrow(dds)
+dds <- dds[ rowSums(counts(dds)) > 1, ]
+nrow(dds)
+
+# Run the DESeq pipeline
+dds <- DESeq(dds)
+res <- results(dds, contrast=c("condition", ctrl_sample, test_sample))
+print(res)
+
+# Sample comparisons
+rld <- rlog(dds)
+vsd <- varianceStabilizingTransformation(dds)
+rlogMat <- assay (rld)
+vstMat <- assay (vsd)
+library("RColorBrewer")
+library("gplots")
+hmcol <- colorRampPalette(brewer.pal(9, "GnBu"))(100)
+distsRL <- dist(t(assay(rld)))
+mat <- as.matrix (distsRL)
+rownames(mat) <- colnames (mat) <- with (colData (dds), paste (condition, sep = " : "))
+hc <- hclust (distsRL)
+
+pdf(file = paste0(ctrl_sample,'_VS_',test_sample,'_HeatMap.pdf'),   # The directory you want to save the file in
+    width = 9, # The width of the plot in inches
+    height = 9) # The height of the plot in inches
+par(cex.main=1, cex.lab=0.7, cex.axis=0.7)
+heatmap.2(mat, Rowv=as.dendrogram(hc), symm=TRUE, trace="none", col = rev (hmcol), margins=c(10,10), cexRow=0.9)
+
+pdf(file = paste0(ctrl_sample,'_VS_',test_sample,'_PCA.pdf'),   # The directory you want to save the file in
+    width = 10, # The width of the plot in inches
+    height = 10) # The height of the plot in inches
+
+
+plotPCA (rld,intgroup=c("condition"))
+
+
+# Exploring and exporting results
+
+pdf(file = paste0(ctrl_sample,'_VS_',test_sample,'.pdf'),   # The directory you want to save the file in
+width = 10, # The width of the plot in inches
+height = 10) # The height of the plot in inches
+
+plotMA(res, ylim=c(-10,10))
+dev.off()
+
+
+identify(res$baseMean, res$log2FoldChange, labels = row.names(res))
+write.csv(as.data.frame(res), file= paste0(ctrl_sample,'_VS_',test_sample,'.csv'))
+
+# Volcano plot
+pdf(file = paste0(ctrl_sample,'_VS_',test_sample,'.volcano.pdf'),   # The directory you want to save the file in
+    width = 10, # The width of the plot in inches
+    height = 10) # The height of the plot in inches
+par(mar=c(5,5,5,5), cex=1.0, cex.main=1.4, cex.axis=1.4, cex.lab=1.4)
+topT <- as.data.frame(res)
+#Adjusted P values (FDR Q values)
+with(topT, plot(log2FoldChange, -log10(padj), pch=20, main=paste0(ctrl_sample,'_VS_',test_sample,'.volcano'), cex=1.0, xlab=bquote(~Log[2]~fold~change), ylab=bquote(~-log[10]~Q~value)))
+with(subset(topT, padj<0.05 & abs(log2FoldChange)>1), points(log2FoldChange, -log10(padj), pch=20, col="red", cex=0.5))
+#Add lines for absolute FC>2 and P-value cut-off at FDR Q<0.05
+abline(v=0, col="black", lty=3, lwd=1.0)
+abline(v=-1, col="black", lty=4, lwd=2.0)
+abline(v=1, col="black", lty=4, lwd=2.0)
+abline(h=-log10(max(topT$pvalue[topT$padj<0.05], na.rm=TRUE)), col="black", lty=4, lwd=2.0)
+dev.off()
+
+```
+
+## Run PEPATAC_DeSeq2.r and remove unwanted chromosome (random, chrUn)
+
+```{bash}
+Rscript PEPATAC_DeSeq2.r MCF7_DpVp MCF7_parent
+Rscript PEPATAC_DeSeq2.r Hut78_DpVp50 Hut78_parent
+Rscript PEPATAC_DeSeq2.r Hut78_Dpp75 Hut78_parent
+
+grep -v random MCF7_DpVp_VS_MCF7_parent.csv | grep -v chrUn  > MCF7_DpVp_VS_MCF7_parent.filtered.csv
+grep -v random Hut78_DpVp50_VS_Hut78_parent.csv | grep -v chrUn  > Hut78_DpVp50_VS_Hut78_parent.filtered.csv
+grep -v random Hut78_Dpp75_VS_Hut78_parent.csv | grep -v chrUn  > Hut78_Dpp75_VS_Hut78_parent.filtered.csv
+```
+
+# Make volcano plot DpVp vs Parent MCF7
+
+```{r}
+
+data <- read.csv('MCF7_DpVp_VS_MCF7_parent.filtered.csv', header=TRUE, sep = ',')
+
+print(head(data))
+
+print(length(which(data$padj < 0.05)))
+
+# add a column of NAs
+data$diffexpressed <- "NO"
+
+# if log2Foldchange > 0.6 and pvalue < 0.05, set as "UP" 
+data$diffexpressed[data$log2FoldChange > 0.6 & data$padj < 0.05] <- "UP"
+
+# if log2Foldchange < -0.6 and pvalue < 0.05, set as "DOWN"
+data$diffexpressed[data$log2FoldChange < -0.6 & data$padj < 0.05] <- "DOWN"
+
+
+#p1 <- ggplot(data=data, aes(x=log2FoldChange, y=-log10(padj), col=diffexpressed)) + 
+p1 <- ggplot(data, aes(x=log2FoldChange, y=-log10(padj))) + 
+
+    geom_point() +
+    theme_bw() +
+    coord_cartesian(xlim = c(-25,25), ylim = c(-10,120)) +
+                            
+    geom_vline(xintercept = -1, linetype="dashed") + geom_vline(xintercept = 1, linetype = "dashed") + # add vertical lines indicating significance
+    geom_hline(yintercept = 1.30, linetype = "dashed") + # add horizontal line for padj
+    labs(title = "Differential Chromatin Accessibility ",
+       x = "Log2FoldChange (DpVp / Parent)", y = "-Log10(padj)") 
+
+#ggsave(file='ATAC_Volcano.MCF7.pdf',p1, width=5, height=4, dpi=200, bg = "transparent")
+
+p1
+
+
+```
+
+# Make volcano plot DpVp vs Parent Hut78
+
+```{r}
+
+
+# https://biocorecrg.github.io/CRG_RIntroduction/volcano-plots.html
+
+data <- read.csv('Hut78_DpVp50_VS_Hut78_parent.filtered.csv', header=TRUE, sep = ',')
+
+print(length(which(data$padj < 0.05)))
+
+
+# add a column of NAs
+data$diffexpressed <- "NO"
+
+# if log2Foldchange > 0.6 and pvalue < 0.05, set as "UP" 
+data$diffexpressed[data$log2FoldChange > 0.6 & data$padj < 0.05] <- "UP"
+
+# if log2Foldchange < -0.6 and pvalue < 0.05, set as "DOWN"
+data$diffexpressed[data$log2FoldChange < -0.6 & data$padj < 0.05] <- "DOWN"
+
+
+#ggplot(data=data, aes(x=log2FoldChange, y=-log10(padj), col=diffexpressed, label=delabel)) + 
+p1 <- ggplot(data, aes(x=log2FoldChange, y=-log10(padj))) + 
+
+    geom_point() +
+    theme_bw() +
+    coord_cartesian(xlim = c(-25,25), ylim = c(-10,120)) +
+                            
+    geom_vline(xintercept = -1, linetype="dashed") + geom_vline(xintercept = 1, linetype = "dashed") + # add vertical lines indicating significance
+    geom_hline(yintercept = 1.30, linetype = "dashed") + # add horizontal line for padj
+    labs(title = "Differential Chromatin Accessibility ",
+       x = "Log2FoldChange (DpVp / Parent)", y = "-Log10(padj)") 
+
+#ggsave(file='ATAC_Volcano.Hut78.pdf',p1, width=5, height=4, dpi=200, bg = "transparent")
+
+p1
+
+
+```
+
+## Format to BED
+
+```{python}
+#DeSeq2BED.py
+# Do not run as chunk but copy paste on local machine.
+
+import sys
+
+infile = open(sys.argv[1]+'.filtered.csv', 'rt')
+
+
+outfile_depleted = open(sys.argv[1]+'.depleted.bed', 'w+')
+outfile_enriched = open(sys.argv[1]+'.enriched.bed', 'w+')
+outfile = open(sys.argv[1]+'.bed', 'w+')
+
+
+infile.readline()
+
+for line in infile:
+    coordinates, baseMean, log2FoldChange, lfcSE, stat, pvalue, padj = line.strip().split(',')
+    #print(padj)
+    
+    try:
+        if padj != 'NA' and float(padj) <= 0.05 :#<= 0.05:
+        
+            chrom, start, end = coordinates.strip('\"').split('_')
+            outfile.write(chrom+'\t'+start+'\t'+end+'\t'+log2FoldChange+'\t'+padj+'\t.\n')
+
+            if float(log2FoldChange) > 0:
+                outfile_enriched.write(chrom+'\t'+start+'\t'+end+'\t'+log2FoldChange+'\t'+padj+'\t.\n')
+
+            if float(log2FoldChange) < 0:
+                outfile_depleted.write(chrom+'\t'+start+'\t'+end+'\t'+log2FoldChange+'\t'+padj+'\t.\n')
+
+        else:
+            continue
+
+    except:
+        print(line)
+```
+
+```{bash}
+python DeSeq2BED.py MCF7_DpVp_VS_MCF7_parent
+python DeSeq2BED.py Hut78_DpVp50_VS_Hut78_parent
+python DeSeq2BED.py Hut78_Dpp75_VS_Hut78_parent
+```
+
+## Merge into unique table
+
+```{python}
+import pandas as pd
+
+MCF7_df = pd.read_table('MCF7_DpVp_VS_MCF7_parent.bed', header=None)
+MCF7_df.columns = ['chrom', 'start', 'end', 'log2FoldChange', 'padj', 'strand']
+
+Hut78_df = pd.read_table('Hut78_DpVp50_VS_Hut78_parent.bed', header=None)
+Hut78_df.columns = ['chrom', 'start', 'end', 'log2FoldChange', 'padj', 'strand']
+
+merged = pd.merge(MCF7_df, Hut78_df, how='outer', on=['chrom', 'start', 'end'])
+merged["start"]=merged["start"].astype(str)
+merged["end"]=merged["end"].astype(str)
+merged
+
+peaks = pd.read_table('PEPATAC_METTL7A_hg38_peaks_coverage.tsv', header=0)
+peaks[['chrom','start','end']] = peaks['name'].str.split('_', expand=True).iloc[: , :3]
+peaks = peaks[['chrom','start','end','MCF7_par1','MCF7_par2','MCF7_DpVp1','MCF7_DpVp2','Hut78_par1','Hut78_par2','Hut78_DpVp1','Hut78_DpVp2']]
+peaks[['MCF7_par1','MCF7_par2','MCF7_DpVp1','MCF7_DpVp2','Hut78_par1','Hut78_par2','Hut78_DpVp1','Hut78_DpVp2']] = peaks[['MCF7_par1','MCF7_par2','MCF7_DpVp1','MCF7_DpVp2','Hut78_par1','Hut78_par2','Hut78_DpVp1','Hut78_DpVp2']] / peaks[['MCF7_par1','MCF7_par2','MCF7_DpVp1','MCF7_DpVp2','Hut78_par1','Hut78_par2','Hut78_DpVp1','Hut78_DpVp2']].sum()
+peaks["start"]=peaks["start"].astype(str)
+peaks["end"]=peaks["end"].astype(str)
+peaks
+
+merged = pd.merge(merged, peaks, how='inner', on=['chrom', 'start', 'end'])
+
+merged.to_csv('ATAC_heatmap.csv')
+merged
+```
+
+# Prepare heatmaps for chromatin opening/closing in MCF7 and Hut78
+
+```{python}
+group1 = merged[(merged['log2FoldChange_x'] > 0) & (merged['log2FoldChange_y'] > 0)] # Open A and B
+group2 = merged[(merged['log2FoldChange_x'] < 0) & (merged['log2FoldChange_y'] < 0)] # Close A and B
+group3 = merged[(merged['log2FoldChange_x'] > 0) & (merged['log2FoldChange_y'] < 0)] # Open A and Close B
+group4 = merged[(merged['log2FoldChange_x'] > 0) & (pd.isna(merged['log2FoldChange_y']))] # Open A Unknown (close) B
+group5 = merged[(merged['log2FoldChange_x'] < 0) & (pd.isna(merged['log2FoldChange_y']))] # Close A and Unknown (close) B
+group6 = merged[(merged['log2FoldChange_x'] < 0) & (merged['log2FoldChange_y'] > 0)] # Close A and Open B
+group7 = merged[(pd.isna(merged['log2FoldChange_x'])) & (merged['log2FoldChange_y'] > 0)] # Unknown (close) A and Open B
+group8 = merged[(pd.isna(merged['log2FoldChange_x'])) & (merged['log2FoldChange_y'] < 0)] # Unknown (close) A and Close B
+
+
+
+frames = [group1,group2,group3,group4,group5,group6,group7,group8]
+result = pd.concat(frames)
+result.to_csv('ATAC_heatmap_sorted.csv')
+result
+
+
+frames = [group1,group2]
+result = pd.concat(frames)
+result.to_csv('ATAC_heatmap_sorted_head.csv')
+#print(len(result.index))
+#print(max(result.padj_y))
+group1.to_csv('group1.bed', sep = '\t', index=False)
+group2.to_csv('group2.bed', sep = '\t', index=False)
+
+
+```
+
+# Heatmap of coinciding opening/closing regions between MCF7 and Hut8
+
+```{r}
+
+rawdata <- read.csv("ATAC_heatmap_sorted_head.csv", header=T, row.names=1)
+print(nrow(rawdata))
+
+# Customizing the output
+pdf("ATAC_heatmap_sorted_head.pdf",         # File name
+    width = 8, height = 7, # Width and height in inches
+    bg = "white",          # Background color
+    colormodel = "cmyk",    # Color model (cmyk is required for most publications)
+    paper = "A4")          # Paper size
+
+# Creating a plot
+
+data <- cbind(rawdata$MCF7_par1,rawdata$MCF7_par2,rawdata$MCF7_DpVp1,rawdata$MCF7_DpVp2,rawdata$Hut78_par1,rawdata$Hut78_par2,rawdata$Hut78_DpVp1,rawdata$Hut78_DpVp2)
+colnames(data) <- c('MCF7_par1','MCF7_par2','MCF7_DpVp1','MCF7_DpVp2','Hut78_par1','Hut78_par2','Hut78_DpVp1','Hut78_DpVp2')
+print(nrow(data))
+
+data <- as.matrix(data)
+heatmap(x=data,  Rowv= NA, labRow = FALSE, margins = c(10,0))
+
+```
+
+# Heatmap of opening/closing regions specific to MCF7 or Hut8
+
+```{r}
+
+rawdata <- read.csv("ATAC_heatmap_sorted.csv", header=T, row.names=1)
+print(nrow(rawdata))
+
+# Customizing the output
+pdf("ATAC_heatmap_sorted.pdf",         # File name
+    width = 8, height = 7, # Width and height in inches
+    bg = "white",          # Background color
+    colormodel = "cmyk",    # Color model (cmyk is required for most publications)
+    paper = "A4")          # Paper size
+
+# Creating a plot
+
+data <- cbind(rawdata$MCF7_par1,rawdata$MCF7_par2,rawdata$MCF7_DpVp1,rawdata$MCF7_DpVp2,rawdata$Hut78_par1,rawdata$Hut78_par2,rawdata$Hut78_DpVp1,rawdata$Hut78_DpVp2)
+colnames(data) <- c('MCF7_par1','MCF7_par2','MCF7_DpVp1','MCF7_DpVp2','Hut78_par1','Hut78_par2','Hut78_DpVp1','Hut78_DpVp2')
+print(nrow(data))
+
+data <- as.matrix(data)
+heatmap(x=data,  Rowv= NA, labRow = FALSE, margins = c(10,0))
+
+```
+
+# Run HOMER on coinciding opening/closing regions
+
+```{bash}
+findMotifsGenome.pl group1.bed hg38 group1.homer -p 8 -len 6,7,8
+findMotifsGenome.pl group2.bed hg38 group2.homer -p 8 -len 6,7,8
+
+
+annotatePeaks.pl group1.bed hg38 -annStats group1.bed.annStats -go group1.bed.go -genomeOntology group1.bed.genomeOntology -cpu 8 > group1.bed.HOMER.out
+annotatePeaks.pl group2.bed hg38 -annStats group2.bed.annStats -go group2.bed.go -genomeOntology group2.bed.genomeOntology -cpu 8 > group2.bed.HOMER.out
+
+
+annotatePeaks.pl group1.bed hg38 -m group1.homer/homerMotifs.all.motifs -p 8 > group1.bed.enriched.annotated_peaks
+annotatePeaks.pl group2.bed hg38 -m group2.homer/homerMotifs.all.motifs -p 8 > group2.bed.enriched.annotated_peaks
+
+cat group1.homer/knownResults/*motif > group1.homer/allknown.motifs
+annotatePeaks.pl group1.bed hg38 -m group1.homer/allknown.motifs -p 8 > group1.bed.allknown.enriched.annotated_peaks
+
+cat group2.homer/knownResults/*motif > group2.homer/allknown.motifs
+annotatePeaks.pl group2.bed hg38 -m group2.homer/allknown.motifs -p 8 > group2.bed.allknown.enriched.annotated_peaks
+```
+
+```{python}
+df = pd.read_csv('group1.bed.allknown.enriched.annotated_peaks', sep = '\t')
+df.to_csv('group1.bed.allknown.enriched.annotated_peaks.csv')
+
+df = pd.read_csv('group2.bed.allknown.enriched.annotated_peaks', sep = '\t')
+df.to_csv('group2.bed.allknown.enriched.annotated_peaks.csv')
+```
+
+# Compare ATAC-seq to RNA-seq results
+
+# Run HOMER on opening/closing regions for MCF7 and Hut78 separately
+
+```{bash}
+annotatePeaks.pl ../DESEQ2/MCF7_DpVp_VS_MCF7_parent.enriched.bed hg38 -annStats MCF7_DpVp_VS_MCF7_parent.enriched.annStats -go MCF7_DpVp_VS_MCF7_parent.enriched.go -genomeOntology MCF7_DpVp_VS_MCF7_parent.enriched.genomeOntology -cpu 8 > MCF7_DpVp_VS_MCF7_parent.enriched.HOMER.out
+annotatePeaks.pl ../DESEQ2/MCF7_DpVp_VS_MCF7_parent.depleted.bed hg38 -annStats MCF7_DpVp_VS_MCF7_parent.depleted.annStats -go MCF7_DpVp_VS_MCF7_parent.depleted.go -genomeOntology MCF7_DpVp_VS_MCF7_parent.depleted.genomeOntology -cpu 8 > MCF7_DpVp_VS_MCF7_parent.depleted.HOMER.out
+
+```
+
+## Merge ATAC-seq and RNA-seq data
+
+```{python}
+
+MCF7_enriched_homer = pd.read_csv('MCF7_DpVp_VS_MCF7_parent.enriched.HOMER.out', delimiter = '\t')
+MCF7_depleted_homer = pd.read_csv('MCF7_DpVp_VS_MCF7_parent.depleted.HOMER.out', delimiter = '\t')
+
+
+MCF7_RNAseq = pd.read_csv('2022.02_M7project_MCF7DpVp300_over_MCF7control_diffex.csv', delimiter = ',')
+MCF7_RNAseq = MCF7_RNAseq[['gene_name', 'log2FoldChange', 'padj']]
+MCF7_RNAseq.columns = ['Hugo_Symbol', 'log2FoldChange', 'padj']
+
+
+MCF7_enriched_homer = MCF7_enriched_homer[['Gene Name']].drop_duplicates()
+MCF7_enriched_homer.columns = ['Hugo_Symbol']
+
+MCF7_depleted_homer = MCF7_depleted_homer[['Gene Name']].drop_duplicates()
+MCF7_depleted_homer.columns = ['Hugo_Symbol']
+
+MCF7_merged_enriched_df = pd.merge(MCF7_RNAseq, MCF7_enriched_homer , how='inner', on='Hugo_Symbol')
+MCF7_merged_depleted_df = pd.merge(MCF7_RNAseq, MCF7_depleted_homer , how='inner', on='Hugo_Symbol')
+
+
+MCF7_outer_merged_df = pd.merge(MCF7_merged_enriched_df,MCF7_merged_depleted_df, how='outer', indicator=True)
+MCF7_merged_enriched_only_df = MCF7_outer_merged_df[MCF7_outer_merged_df['_merge'] == 'left_only']
+MCF7_merged_depleted_only_df = MCF7_outer_merged_df[MCF7_outer_merged_df['_merge'] == 'right_only']
+
+MCF7_merged_enriched_only_df.to_csv('MCF7_merged_enriched_only.csv')
+MCF7_merged_depleted_only_df.to_csv('MCF7_merged_depleted_only.csv')
+
+
+MCF7_inner_merged_df = pd.merge(MCF7_merged_enriched_df,MCF7_merged_depleted_df, how='inner', indicator=True)
+MCF7_inner_merged_df.to_csv('MCF7_inner_merged.csv')
+
+```
+
+## Boxplot of gene epression levels split by change in chromatin status
+
+```{r}
+
+enriched_only <- read.csv('MCF7_merged_enriched_only.csv')
+depleted_only <- read.csv('MCF7_merged_depleted_only.csv')
+inner <- read.csv('MCF7_inner_merged.csv')
+
+dataf = cbind.data.frame(log2FoldChange = enriched_only$log2FoldChange, group = 'enriched_only')
+dataf = rbind.data.frame(dataf, cbind.data.frame(log2FoldChange = depleted_only$log2FoldChange, group = 'depleted_only'))
+dataf = rbind.data.frame(dataf, cbind.data.frame(log2FoldChange = inner$log2FoldChange, group = 'both'))
+
+
+
+print(t.test(enriched_only$log2FoldChange,depleted_only$log2FoldChange))
+print(t.test(enriched_only$log2FoldChange,inner$log2FoldChange))
+
+p1 <- ggplot() + 
+  geom_boxplot(data = dataf, aes(y = log2FoldChange, x = group), outlier.shape = NA) +
+  coord_cartesian(ylim = c(-2,2)) +
+  scale_x_discrete(labels = c('open and close', 'more close', 'more open')) +
+  labs(x='MCF7', y='log2FC gene expression', title='Gene expression and chromatin accessibility') +
+  theme_classic(base_size = 20)
+
+ggsave(file='ATACvsRNAseq.MCF7.pdf',p1, width=15, height=10, dpi=200, bg = "transparent")
+
+p1
+
+```
+
+```{python}
+Hut78_DpVp50_enriched_homer = pd.read_csv('Hut78_DpVp50_VS_Hut78_parent.enriched.HOMER.out', delimiter = '\t')
+Hut78_DpVp50_depleted_homer = pd.read_csv('Hut78_DpVp50_VS_Hut78_parent.depleted.HOMER.out', delimiter = '\t')
+
+
+Hut78_DpVp50_RNAseq = pd.read_csv('2022.02_M7project_Hut78DpVp50_over_Hut78control_diffex.csv', delimiter = ',')
+#RNAseq.columns = ['Hugo_Symbol']
+
+Hut78_DpVp50_RNAseq = Hut78_DpVp50_RNAseq[['gene_name', 'log2FoldChange', 'padj']]
+Hut78_DpVp50_RNAseq.columns = ['Hugo_Symbol', 'log2FoldChange', 'padj']
+
+
+Hut78_DpVp50_enriched_homer = Hut78_DpVp50_enriched_homer[['Gene Name']].drop_duplicates()
+Hut78_DpVp50_enriched_homer.columns = ['Hugo_Symbol']
+
+Hut78_DpVp50_depleted_homer = Hut78_DpVp50_depleted_homer[['Gene Name']].drop_duplicates()
+Hut78_DpVp50_depleted_homer.columns = ['Hugo_Symbol']
+
+Hut78_DpVp50_merged_enriched_df = pd.merge(Hut78_DpVp50_RNAseq, Hut78_DpVp50_enriched_homer , how='inner', on='Hugo_Symbol')
+Hut78_DpVp50_merged_depleted_df = pd.merge(Hut78_DpVp50_RNAseq, Hut78_DpVp50_depleted_homer , how='inner', on='Hugo_Symbol')
+
+
+Hut78_DpVp50_outer_merged_df = pd.merge(Hut78_DpVp50_merged_enriched_df,Hut78_DpVp50_merged_depleted_df, how='outer', indicator=True)
+Hut78_DpVp50_merged_enriched_only_df = Hut78_DpVp50_outer_merged_df[Hut78_DpVp50_outer_merged_df['_merge'] == 'left_only']
+Hut78_DpVp50_merged_depleted_only_df = Hut78_DpVp50_outer_merged_df[Hut78_DpVp50_outer_merged_df['_merge'] == 'right_only']
+
+Hut78_DpVp50_merged_enriched_only_df.to_csv('Hut78_DpVp50_merged_enriched_only.csv')
+Hut78_DpVp50_merged_depleted_only_df.to_csv('Hut78_DpVp50_merged_depleted_only.csv')
+
+
+Hut78_DpVp50_inner_merged_df = pd.merge(Hut78_DpVp50_merged_enriched_df,Hut78_DpVp50_merged_depleted_df, how='inner', indicator=True)
+Hut78_DpVp50_inner_merged_df.to_csv('Hut78_DpVp50_inner_merged.csv')
+
+```
+
+```{r}
+enriched_only <- read.csv('Hut78_DpVp50_merged_enriched_only.csv')
+depleted_only <- read.csv('Hut78_DpVp50_merged_depleted_only.csv')
+inner <- read.csv('Hut78_DpVp50_inner_merged.csv')
+
+dataf = cbind.data.frame(log2FoldChange = enriched_only$log2FoldChange, group = 'enriched_only')
+dataf = rbind.data.frame(dataf, cbind.data.frame(log2FoldChange = depleted_only$log2FoldChange, group = 'depleted_only'))
+dataf = rbind.data.frame(dataf, cbind.data.frame(log2FoldChange = inner$log2FoldChange, group = 'both'))
+
+
+print(t.test(enriched_only$log2FoldChange,depleted_only$log2FoldChange))
+print(t.test(enriched_only$log2FoldChange,inner$log2FoldChange))
+
+p1 <- ggplot() + 
+  geom_boxplot(data = dataf, aes(y = log2FoldChange, x = group), outlier.shape = NA) +
+  coord_cartesian(ylim = c(-2,2)) +
+  scale_x_discrete(labels = c('open and close', 'more close', 'more open')) +
+  labs(x='Hut78', y='log2FC gene expression', title='Gene expression and chromatin accessibility') +
+  theme_classic(base_size = 20)
+
+ggsave(file='ATACvsRNAseq.Hut78.pdf',p1, width=15, height=10, dpi=200, bg = "transparent")
+
+
+p1
+```
+
+# Preprocessing MNase-Exo Data
+
+## Trimm, map, reformat
+
+```{r}
+setwd("/Volumes/My Passport for Mac/LCB_BACKUPS_JULY2022/Zhurkin Lab")
+```
+
+```{bash}
+
+### DpVp w/ Romi ################
+cutadapt -j 32 -b file:TruSeq_and_nextera_adapters.fa -B file:TruSeq_and_nextera_adapters.fa --trim-n -m 50 -o 5_DpVp_48h_5_200u_S2_R1_001.trimmed.fastq.gz -p 5_DpVp_48h_5_200u_S2_R2_001.trimmed.fastq.gz Sample_5_DpVp_48h_5_200u/5_DpVp_48h_5_200u_S2_R1_001.fastq.gz Sample_5_DpVp_48h_5_200u/5_DpVp_48h_5_200u_S2_R2_001.fastq.gz
+pear -p 0.0001 -f 5_DpVp_48h_5_200u_S2_R1_001.trimmed.fastq.gz -r 5_DpVp_48h_5_200u_S2_R2_001.trimmed.fastq.gz -o 5_DpVp_48h_5_200u -j 32
+
+gzip -f 5_DpVp_48h_5_200u.assembled.fastq &
+bowtie2 -p 32 -x hg19 -U 5_DpVp_48h_5_200u.assembled.fastq.gz -S 5_DpVp_48h_5_200u.assembled.hg19.bam 
+samtools view -b -F 260 5_DpVp_48h_5_200u.assembled.hg19.bam > 5_DpVp_48h_5_200u.mapped.hg19.bam
+bedtools bamtobed -i 5_DpVp_48h_5_200u.mapped.hg19.bam > 5_DpVp_48h_5_200u.mapped.hg19.bed
+
+### DpVp No Romi ################
+cutadapt -j 32 -b file:TruSeq_and_nextera_adapters.fa -B file:TruSeq_and_nextera_adapters.fa --trim-n -m 50 -o 9_DpVp_5_200u_S4_R1_001.trimmed.fastq.gz -p 9_DpVp_5_200u_S4_R2_001.trimmed.fastq.gz Sample_9_DpVp_5_200u/9_DpVp_5_200u_S4_R1_001.fastq.gz Sample_9_DpVp_5_200u/9_DpVp_5_200u_S4_R2_001.fastq.gz
+pear -p 0.0001 -f 9_DpVp_5_200u_S4_R1_001.trimmed.fastq.gz -r 9_DpVp_5_200u_S4_R2_001.trimmed.fastq.gz -o 9_DpVp_5_200u -j 32
+
+gzip -f 9_DpVp_5_200u.assembled.fastq &
+bowtie2 -p 32 -x hg19 -U 9_DpVp_5_200u.assembled.fastq.gz -S 9_DpVp_5_200u.assembled.hg19.bam 
+samtools view -b -F 260 9_DpVp_5_200u.assembled.hg19.bam > 9_DpVp_5_200u.mapped.hg19.bam
+bedtools bamtobed -i 9_DpVp_5_200u.mapped.hg19.bam > 9_DpVp_5_200u.mapped.hg19.bed
+
+### Parent No Romi ################
+cutadapt -j 32 -b file:TruSeq_and_nextera_adapters.fa -B file:TruSeq_and_nextera_adapters.fa --trim-n -m 50 -o 1_MCF7_5_200_S1_R1_001.trimmed.fastq.gz -p 1_MCF7_5_200_S1_R2_001.trimmed.fastq.gz 1_MCF7_5_200_S1_R1_001.fastq.gz 1_MCF7_5_200_S1_R2_001.fastq.gz
+pear -p 0.0001 -f 1_MCF7_5_200_S1_R1_001.trimmed.fastq.gz -r 1_MCF7_5_200_S1_R2_001.trimmed.fastq.gz -o 1_MCF7_5_200 -j 32
+
+gzip 1_MCF7_5_200.assembled.fastq &
+bowtie2 -p 32 -x hg19 -U 1_MCF7_5_200.assembled.fastq.gz -S 1_MCF7_5_200.assembled.hg19.bam 
+samtools view -b -F 260 1_MCF7_5_200.assembled.hg19.bam > 1_MCF7_5_200.mapped.hg19.bam
+bedtools bamtobed -i 1_MCF7_5_200.mapped.hg19.bam > 1_MCF7_5_200.mapped.hg19.bed
+
+
+### Parent w/ Romi ################
+cutadapt -j 8 -b file:TruSeq_and_nextera_adapters.fa -B file:TruSeq_and_nextera_adapters.fa --trim-n -m 50 -o 4_MCF7_48h_5_200_S4_R1_001.trimmed.fastq.gz -p 4_MCF7_48h_5_200_S4_R2_001.trimmed.fastq.gz 4_MCF7_48h_5_200_S4_R1_001.fastq.gz 4_MCF7_48h_5_200_S4_R2_001.fastq.gz
+pear -p 0.0001 -f 4_MCF7_48h_5_200_S4_R1_001.trimmed.fastq.gz -r 4_MCF7_48h_5_200_S4_R2_001.trimmed.fastq.gz -o 4_MCF7_48h_5_200 -j 32
+
+gzip 4_MCF7_48h_5_200.assembled.fastq &
+bowtie2 -p 32 -x hg19 -U 4_MCF7_48h_5_200.assembled.fastq.gz -S 4_MCF7_48h_5_200.assembled.hg19.bam &
+samtools view -b -F 260 4_MCF7_48h_5_200.assembled.hg19.bam > 4_MCF7_48h_5_200.mapped.hg19.bam
+bedtools bamtobed -i 4_MCF7_48h_5_200.mapped.hg19.bam > 4_MCF7_48h_5_200.mapped.hg19.bed
+```
+
+# Count NSMs in Genes¶
+
+```{bash}
+### Parent No Romi ################
+awk '{ if ($3-$2 > 80 && $3-$2 < 140) print $0}' 1_MCF7_5_200.mapped.hg19.bed > 1_MCF7_5_200.80-140.hg19.bed 
+bedtools intersect -wo -a 1_MCF7_5_200.80-140.hg19.bed -b hg19_protein-coding_genes.bed > 1_MCF7_5_200.80-140.InGenes.hg19.bed
+python3 COUNT_NSMS_IN_GENES.py 1_MCF7_5_200.80-140.InGenes.hg19.bed 1_MCF7_5_200.80-140.InGenes 1_MCF7_5_200.80-140.InGenes.hg19.counts.csv
+
+
+### Parent w/ Romi ################
+awk '{ if ($3-$2 > 80 && $3-$2 < 140) print $0}' 4_MCF7_48h_5_200.mapped.hg19.bed > 4_MCF7_48h_5_200.80-140.hg19.bed 
+bedtools intersect -wo -a 4_MCF7_48h_5_200.80-140.hg19.bed -b hg19_protein-coding_genes.bed > 4_MCF7_48h_5_200.80-140.InGenes.hg19.bed
+python3 COUNT_NSMS_IN_GENES.py 4_MCF7_48h_5_200.80-140.InGenes.hg19.bed 4_MCF7_48h_5_200.80-140.InGenes 4_MCF7_48h_5_200.80-140.InGenes.hg19.counts.csv
+
+
+### DpVp w/ Romi ################
+awk '{ if ($3-$2 > 80 && $3-$2 < 140) print $0}' /data/Zhurkin-20/5_DpVp_48h_5_200u.mapped.hg19.bed > 5_DpVp_48h_5_200u.80-140.hg19.bed 
+bedtools intersect -wo -a 5_DpVp_48h_5_200u.80-140.hg19.bed -b hg19_protein-coding_genes.bed > 5_DpVp_48h_5_200u.80-140.InGenes.hg19.bed
+python3 COUNT_NSMS_IN_GENES.py 5_DpVp_48h_5_200u.80-140.InGenes.hg19.bed 5_DpVp_48h_5_200u.80-140.InGenes 5_DpVp_48h_5_200u.80-140.InGenes.hg19.counts.csv
+
+### DpVp No Romi ################
+awk '{ if ($3-$2 > 80 && $3-$2 < 140) print $0}' /data/Zhurkin-20/9_DpVp_5_200u.mapped.hg19.bed > 9_DpVp_5_200u.80-140.hg19.bed 
+bedtools intersect -wo -a 9_DpVp_5_200u.80-140.hg19.bed -b hg19_protein-coding_genes.bed > 9_DpVp_5_200u.80-140.InGenes.hg19.bed
+python3 COUNT_NSMS_IN_GENES.py 9_DpVp_5_200u.80-140.InGenes.hg19.bed 9_DpVp_5_200u.80-140.InGenes 9_DpVp_5_200u.80-140.InGenes.hg19.counts.csv
+```
+
+# Gather counts in a table
+
+## Normalized by total NSMs count in each set¶
+
+```{bash}
+wc -l 1_MCF7_5_200.80-140.hg19.bed 4_MCF7_48h_5_200.80-140.hg19.bed 5_DpVp_48h_5_200u.80-140.hg19.bed 9_DpVp_5_200u.80-140.hg19.bed 2_MCF7_25u.80-140.hg19.bed 11_DpVp_25_200u.80-140.hg19.bed
+```
+
+60020269 1_MCF7_5\_200.80-140.hg19.bed 102474238 4_MCF7_48h_5\_200.80-140.hg19.bed 52256301 5_DpVp_48h_5\_200u.80-140.hg19.bed 47550868 9_DpVp_5\_200u.80-140.hg19.bed
+
+```{python}
+import pandas as pd
+
+Parent_NoRomi = pd.read_csv('1_MCF7_5_200.80-140.InGenes.hg19.counts.csv')
+Parent_Romi = pd.read_csv('4_MCF7_48h_5_200.80-140.InGenes.hg19.counts.csv')
+DpVp_NoRomi = pd.read_csv('9_DpVp_5_200u.80-140.InGenes.hg19.counts.csv')
+DpVp_Romi = pd.read_csv('5_DpVp_48h_5_200u.80-140.InGenes.hg19.counts.csv')
+
+Parent_NoRomi = Parent_NoRomi.rename(columns={"Unnamed: 0": "Hugo_Symbol", "1_MCF7_5_200.80-140.InGenes": "Parent_NoRomi"})
+Parent_Romi = Parent_Romi.rename(columns={"Unnamed: 0": "Hugo_Symbol", "4_MCF7_48h_5_200.80-140.InGenes": "Parent_Romi"})
+DpVp_NoRomi = DpVp_NoRomi.rename(columns={"Unnamed: 0": "Hugo_Symbol", "9_DpVp_5_200u.80-140.InGenes": "DpVp_NoRomi"})
+DpVp_Romi = DpVp_Romi.rename(columns={"Unnamed: 0": "Hugo_Symbol", "5_DpVp_48h_5_200u.80-140.InGenes": "DpVp_Romi"})
+
+df_annotation = pd.read_csv('hg19_protein-coding_genes.csv')
+
+merged_df = pd.merge(df_annotation, Parent_NoRomi , how='outer', on='Hugo_Symbol')
+merged_df = pd.merge(merged_df, Parent_Romi , how='outer', on='Hugo_Symbol')
+merged_df = pd.merge(merged_df, DpVp_NoRomi , how='outer', on='Hugo_Symbol')
+merged_df = pd.merge(merged_df, DpVp_Romi , how='outer', on='Hugo_Symbol')
+
+
+merged_df['Parent_NoRomi_Norm'] = merged_df.Parent_NoRomi  / merged_df.Length / 60020269
+merged_df['Parent_Romi_Norm'] = merged_df.Parent_Romi  / merged_df.Length / 102474238
+merged_df['DpVp_NoRomi_Norm'] = merged_df.DpVp_NoRomi  / merged_df.Length / 47550868
+merged_df['DpVp_Romi_Norm'] = merged_df.DpVp_Romi  / merged_df.Length / 52256301
+
+
+merged_df.to_csv('MN-EXO_ROMI.csv')
+
+
+```
+
+```{r}
+merged_df <- read.csv('/Volumes/My Passport for Mac/LCB_BACKUPS_JULY2022/Zhurkin Lab/MN-EXO_ROMI.csv')
+
+p1 <- ggplot() +
+
+    geom_freqpoly(data = merged_df, aes(x=merged_df$Parent_NoRomi_Norm), binwidth = 2e-11) +
+    geom_freqpoly(data = merged_df, aes(x=merged_df$Parent_Romi_Norm), binwidth = 2e-11) +
+    geom_freqpoly(data = merged_df, aes(x=merged_df$DpVp_NoRomi_Norm), binwidth = 2e-11) +
+    geom_freqpoly(data = merged_df, aes(x=merged_df$DpVp_Romi_Norm), binwidth = 2e-11)
+
+
+pg <- ggplot_build(p1)
+write.csv(pg$data, 'MN-EXO_ROMI_hist.csv')
+
+toplot <- read.csv('MN-EXO_ROMI_hist.csv')
+
+names(toplot)[names(toplot) == "count"] <- "Parent_NoRomi"
+names(toplot)[names(toplot) == "count.1"] <- "Parent_Romi"
+names(toplot)[names(toplot) == "count.2"] <- "DpVp_NoRomi"
+names(toplot)[names(toplot) == "count.3"] <- "DpVp_Romi"
+
+```
+
+# Plot NSM density in genes
+
+```{r}
+M7A_Parent_NoRomi <- merged_df[which(merged_df$Hugo_Symbol == 'METTL7A'),]$Parent_NoRomi_Norm
+M7A_Parent_NoRomi <- toplot[which(toplot$x >= M7A_Parent_NoRomi)[1],]
+
+#tail(which(toplot[which(toplot$Parent_NoRomi <= M7A_Parent_NoRomi), n=1)
+M7B_Parent_NoRomi <- merged_df[which(merged_df$Hugo_Symbol == 'METTL7B'),]$Parent_NoRomi_Norm
+M7B_Parent_NoRomi <- toplot[which(toplot$x >= M7B_Parent_NoRomi)[1],]
+
+PEG10_Parent_NoRomi <- merged_df[which(merged_df$Hugo_Symbol == 'PEG10'),]$Parent_NoRomi_Norm
+PEG10_Parent_NoRomi <- toplot[which(toplot$x >= PEG10_Parent_NoRomi)[1],]
+
+PRAME_Parent_NoRomi <- merged_df[which(merged_df$Hugo_Symbol == 'PRAME'),]$Parent_NoRomi_Norm
+PRAME_Parent_NoRomi <- toplot[which(toplot$x >= PRAME_Parent_NoRomi)[1],]
+
+SGCE_Parent_NoRomi <- merged_df[which(merged_df$Hugo_Symbol == 'SGCE'),]$Parent_NoRomi_Norm
+SGCE_Parent_NoRomi <- toplot[which(toplot$x >= SGCE_Parent_NoRomi)[1],]
+
+
+
+cols <- c("Parent_NoRomi" = 'cornflowerblue', 'Parent_Romi' = 'sienna2')
+
+
+p1 <- ggplot() +
+
+    geom_line(data = toplot, aes(x=x, y=Parent_NoRomi), size = 1.5) + 
+
+    geom_point(data = M7A_Parent_NoRomi, aes(x=x, y=Parent_NoRomi), color = 'red', size = 5) + 
+    geom_text_repel(data = M7A_Parent_NoRomi, aes(x=x, y=Parent_NoRomi), label = 'METTL7A',
+                  nudge_x = 10e-10, # MOVE TO THE RIGHT
+                  box.padding = 0.5, # label genes of interest, ensure labels don't overlap other elements
+                  max.overlaps = Inf, 
+                  segment.color = "red",
+                  size = 10,
+                  color = "red") +
+
+
+    geom_point(data = M7B_Parent_NoRomi, aes(x=x, y=Parent_NoRomi), color = 'blue', size = 5) + 
+    geom_text_repel(data = M7B_Parent_NoRomi, aes(x=x, y=Parent_NoRomi), label = 'METTL7B',
+                  nudge_x = 10e-10, # MOVE TO THE RIGHT
+                  box.padding = 0.5, # label genes of interest, ensure labels don't overlap other elements
+                  max.overlaps = Inf, 
+                  segment.color = "blue",
+                  size = 10,
+                  color = "blue") +
+
+    geom_point(data = PEG10_Parent_NoRomi, aes(x=x, y=Parent_NoRomi), color = 'red', size = 5) + 
+    geom_text_repel(data = PEG10_Parent_NoRomi, aes(x=x, y=Parent_NoRomi), label = 'PEG10',
+                  nudge_x = 10e-10, # MOVE TO THE RIGHT
+                  box.padding = 0.5, # label genes of interest, ensure labels don't overlap other elements
+                  max.overlaps = Inf, 
+                  segment.color = "red",
+                  size = 10,
+                  color = "red") +
+  
+    geom_point(data = PRAME_Parent_NoRomi, aes(x=x, y=Parent_NoRomi), color = 'red', size = 5) + 
+    geom_text_repel(data = PRAME_Parent_NoRomi, aes(x=x, y=Parent_NoRomi), label = 'PRAME',
+                  nudge_x = 10e-10, # MOVE TO THE RIGHT
+                  box.padding = 0.5, # label genes of interest, ensure labels don't overlap other elements
+                  max.overlaps = Inf, 
+                  segment.color = "red",
+                  size = 10,
+                  color = "red") +
+  
+    geom_point(data = SGCE_Parent_NoRomi, aes(x=x, y=Parent_NoRomi), color = 'red', size = 5) + 
+    geom_text_repel(data = SGCE_Parent_NoRomi, aes(x=x, y=Parent_NoRomi), label = 'SGCE',
+                  nudge_x = 10e-10, # MOVE TO THE RIGHT
+                  box.padding = 0.5, # label genes of interest, ensure labels don't overlap other elements
+                  max.overlaps = Inf, 
+                  segment.color = "red",
+                  size = 10,
+                  color = "red") +
+
+    theme_classic(base_size = 30) +
+    theme(axis.text.x = element_text(angle = 0, vjust = 0.5, hjust=0.5),
+        rect = element_rect(fill = "transparent"),
+        panel.grid.major = element_line(colour = "transparent", size = 0.5), 
+        panel.grid.minor = element_line(colour = "transparent", size = 0.5),
+        panel.background = element_rect(fill = "transparent",colour = NA),
+        plot.background = element_rect(fill = "transparent",colour = NA)) +
+
+  coord_cartesian(xlim = c(0,1e-9), ylim = c(0,2000)) +
+  labs(y='', x='Nucleosome Density in Genes')  +
+  scale_colour_manual(name="",values=cols)
+
+
+grid.arrange(p1,top=textGrob("Non-Resistant | Romidepsin -",gp=gpar(fontsize=32,fontface="bold")))
+g <- arrangeGrob(p1,top=textGrob("Non-Resistant | Romidepsin - ",gp=gpar(fontsize=32,fontface="bold")))
+ggsave(file='M7_NSM_Density_Parent.pdf',g, width=15, height=10, dpi=200, bg = "transparent")
+
+
+```
+
+```{r}
+M7A_DpVp_NoRomi <- merged_df[which(merged_df$Hugo_Symbol == 'METTL7A'),]$DpVp_NoRomi_Norm
+M7A_DpVp_NoRomi <- toplot[which(toplot$x >= M7A_DpVp_NoRomi)[1],]
+#tail(which(toplot[which(toplot$Parent_NoRomi <= M7A_Parent_NoRomi), n=1)
+M7B_DpVp_NoRomi <- merged_df[which(merged_df$Hugo_Symbol == 'METTL7B'),]$DpVp_NoRomi_Norm
+M7B_DpVp_NoRomi <- toplot[which(toplot$x >= M7B_DpVp_NoRomi)[1],]
+
+PEG10_DpVp_NoRomi <- merged_df[which(merged_df$Hugo_Symbol == 'PEG10'),]$DpVp_NoRomi_Norm
+PEG10_DpVp_NoRomi <- toplot[which(toplot$x >= PEG10_DpVp_NoRomi)[1],]
+
+PRAME_DpVp_NoRomi <- merged_df[which(merged_df$Hugo_Symbol == 'PRAME'),]$DpVp_NoRomi_Norm
+PRAME_DpVp_NoRomi <- toplot[which(toplot$x >= PRAME_DpVp_NoRomi)[1],]
+
+SGCE_DpVp_NoRomi <- merged_df[which(merged_df$Hugo_Symbol == 'SGCE'),]$DpVp_NoRomi_Norm
+SGCE_DpVp_NoRomi <- toplot[which(toplot$x >= SGCE_DpVp_NoRomi)[1],]
+
+
+p1 <- ggplot() +
+
+    geom_line(data = toplot, aes(x=x, y=DpVp_NoRomi), size = 1.5) + 
+
+    geom_point(data = M7A_DpVp_NoRomi, aes(x=x, y=DpVp_NoRomi), color = 'red', size = 5) + 
+    geom_text_repel(data = M7A_DpVp_NoRomi, aes(x=x, y=DpVp_NoRomi), label = 'METTL7A',
+                  nudge_x = 10e-10, # MOVE TO THE RIGHT
+                  nudge_y = 1e2, # MOVE UP
+                  box.padding = 0.5, # label genes of interest, ensure labels don't overlap other elements
+                  max.overlaps = Inf, 
+                  segment.color = "red",
+                  size = 10,
+                  color = "red") +
+
+
+    geom_point(data = M7B_DpVp_NoRomi, aes(x=x, y=DpVp_NoRomi), color = 'blue', size = 5) + 
+    geom_text_repel(data = M7B_DpVp_NoRomi, aes(x=x, y=DpVp_NoRomi), label = 'METTL7B',
+                  nudge_x = 10e-10, # MOVE TO THE RIGHT
+                  box.padding = 0.5, # label genes of interest, ensure labels don't overlap other elements
+                  max.overlaps = Inf, 
+                  segment.color = "blue",
+                  size = 10,
+                  color = "blue") +
+
+    geom_point(data = PEG10_DpVp_NoRomi, aes(x=x, y=DpVp_NoRomi), color = 'red', size = 5) + 
+    geom_text_repel(data = PEG10_DpVp_NoRomi, aes(x=x, y=DpVp_NoRomi), label = 'PEG10',
+                  nudge_x = 10e-10, # MOVE TO THE RIGHT
+                  box.padding = 0.5, # label genes of interest, ensure labels don't overlap other elements
+                  max.overlaps = Inf, 
+                  segment.color = "red",
+                  size = 10,
+                  color = "red") +
+  
+    geom_point(data = PRAME_DpVp_NoRomi, aes(x=x, y=DpVp_NoRomi), color = 'red', size = 5) + 
+    geom_text_repel(data = PRAME_DpVp_NoRomi, aes(x=x, y=DpVp_NoRomi), label = 'PRAME',
+                  nudge_x = 10e-10, # MOVE TO THE RIGHT
+                  box.padding = 0.5, # label genes of interest, ensure labels don't overlap other elements
+                  max.overlaps = Inf, 
+                  segment.color = "red",
+                  size = 10,
+                  color = "red") +
+  
+    geom_point(data = SGCE_DpVp_NoRomi, aes(x=x, y=DpVp_NoRomi), color = 'red', size = 5) + 
+    geom_text_repel(data = SGCE_DpVp_NoRomi, aes(x=x, y=DpVp_NoRomi), label = 'SGCE',
+                  nudge_x = 10e-10, # MOVE TO THE RIGHT
+                  box.padding = 0.5, # label genes of interest, ensure labels don't overlap other elements
+                  max.overlaps = Inf, 
+                  segment.color = "red",
+                  size = 10,
+                  color = "red") +
+  
+
+    theme_classic(base_size = 30) +
+    theme(axis.text.x = element_text(angle = 0, vjust = 0.5, hjust=0.5),
+        rect = element_rect(fill = "transparent"),
+        panel.grid.major = element_line(colour = "transparent", size = 0.5), 
+        panel.grid.minor = element_line(colour = "transparent", size = 0.5),
+        panel.background = element_rect(fill = "transparent",colour = NA),
+        plot.background = element_rect(fill = "transparent",colour = NA)) +
+
+  coord_cartesian(xlim = c(0,1e-9), ylim = c(0,2000)) +
+  labs(y='', x='Nucleosome Density in Genes')  +
+  scale_colour_manual(name="",values=cols)
+
+grid.arrange(p1,top=textGrob("Resistant | Romidepsin -",gp=gpar(fontsize=32,fontface="bold")))
+g <- arrangeGrob(p1,top=textGrob("Resistant | Romidepsin -",gp=gpar(fontsize=32,fontface="bold")))
+ggsave(file='M7_NSM_Density_DpVp.pdf',g, width=15, height=10, dpi=200, bg = "transparent")
+```
